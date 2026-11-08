@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Text & Drawing via Light</title>
+<style>
+  body { font-family: sans-serif; background: #111; color: #eee;
+         text-align: center; padding: 20px; }
+  input { width: 85%; padding: 12px; font-size: 18px;
+          border-radius: 8px; border: none; }
+  button { margin: 8px 4px; padding: 12px 22px; font-size: 18px;
+           border: none; border-radius: 8px; background: #4caf50; color: #fff; }
+  button.secondary { background: #555; }
+  button:disabled { background: #333; }
+  .section { margin-top: 28px; padding-top: 16px; border-top: 1px solid #333; }
+  .grid { display: grid; grid-template-columns: repeat(5, 44px); gap: 6px;
+          justify-content: center; margin: 14px auto; }
+  .cell { width: 44px; height: 44px; background: #222; border: 1px solid #444;
+          border-radius: 6px; cursor: pointer; }
+  .cell.on { background: #4caf50; border-color: #4caf50; }
+  #status { margin-top: 20px; color: #aaa; min-height: 24px; }
+  .hint { color: #888; font-size: 14px; }
+</style>
+</head>
+<body>
+
+<h2>Text & Drawing via Light</h2>
+
+<div>
+  <input id="text" value="JAI PHYSICS" placeholder="Type your message..." maxlength="200">
+  <br>
+  <button id="sendText">Send Text</button>
+</div>
+
+<div class="section">
+  <h3>Draw an icon (5 x 8 pixels)</h3>
+  <p class="hint">Tap the squares to draw. It shows as one drawing on the LCD.</p>
+  <div class="grid" id="grid"></div>
+  <button id="clearBtn" class="secondary">Clear</button>
+  <button id="sendDraw">Send Drawing</button>
+</div>
+
+<p id="status">Allow camera permission when asked.</p>
+
+<script>
+const BIT_MS = 120;     // MUST match BIT_MS on the ESP32
+const DRAW_MARKER = 1;  // MUST match DRAW_MARKER on the ESP32
+let track = null;
+
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const statusEl = document.getElementById("status");
+
+// ---------- Torch ----------
+async function getTrack() {
+  if (track) return track;
+  const stream = await navigator.mediaDevices.getUserMedia({
+    video: { facingMode: "environment" }
+  });
+  track = stream.getVideoTracks()[0];
+  const caps = track.getCapabilities ? track.getCapabilities() : {};
+  if (!caps.torch) {
+    throw new Error("This phone/browser doesn't support torch control. Use Chrome on Android.");
+  }
+  return track;
+}
+
+async function setTorch(on) {
+  await track.applyConstraints({ advanced: [{ torch: on }] });
+}
+
+// ---------- Sending ----------
+async function sendBits(bits) {
+  let t = performance.now();
+  for (const b of bits) {
+    await setTorch(b === 1);
+    t += BIT_MS;
+    const wait = t - performance.now();
+    if (wait > 0) await sleep(wait);
+  }
+}
+
+// One byte = start bit, 8 data bits (LSB first), stop bit, gap
+function frameFor(value) {
+  const bits = [1];
+  for (let i = 0; i < 8; i++) bits.push((value >> i) & 1);
+  bits.push(0, 0);
+  return bits;
+}
+
+async function sendByte(value) {
+  await sendBits(frameFor(value & 0xFF));
+}
+
+// ---------- Text ----------
+async function sendText(text) {
+  await getTrack();
+  await setTorch(false);
+  await sleep(1000);                 // lead-in so the receiver settles
+
+  const payload = text + "\n";       // newline = end of message
+  let sent = 0;
+  for (const ch of payload) {
+    await sendByte(ch.charCodeAt(0));
+    sent++;
+    statusEl.textContent = `Sending text... ${sent}/${payload.length}`;
+  }
+  await setTorch(false);
+}
+
+// ---------- Drawing ----------
+const pixels = Array.from({ length: 8 }, () => Array(5).fill(false));
+const grid = document.getElementById("grid");
+
+function buildGrid() {
+  grid.innerHTML = "";
+  for (let r = 0; r < 8; r++) {
+    for (let c = 0; c < 5; c++) {
+      const cell = document.createElement("div");
+      cell.className = "cell" + (pixels[r][c] ? " on" : "");
+      cell.onclick = () => {
+        pixels[r][c] = !pixels[r][c];
+        cell.classList.toggle("on", pixels[r][c]);
+      };
+      grid.appendChild(cell);
+    }
+  }
+}
+
+// Each row becomes one byte. Bit 4 = leftmost column (HD44780 format).
+function rowBytes() {
+  return pixels.map(row =>
+    row.reduce((acc, on, c) => acc | (on ? (1 << (4 - c)) : 0), 0)
+  );
+}
+
+async function sendDrawing() {
+  await getTrack();
+  await setTorch(false);
+  await sleep(1000);
+  await sendByte(DRAW_MARKER);       // tells the ESP32 "drawing next"
+  for (const row of rowBytes()) {
+    await sendByte(row);
+  }
+  await setTorch(false);
+}
+
+document.getElementById("clearBtn").onclick = () => {
+  pixels.forEach(row => row.fill(false));
+  buildGrid();
+};
+
+// ---------- Buttons ----------
+async function runSend(label, fn, btn) {
+  btn.disabled = true;
+  statusEl.textContent = label + "...";
+  try {
+    await fn();
+    statusEl.textContent = "Done! Check the LCD.";
+  } catch (e) {
+    statusEl.textContent = "Error: " + e.message;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+document.getElementById("sendText").onclick = () => {
+  const text = document.getElementById("text").value;
+  if (!text) { statusEl.textContent = "Type something first."; return; }
+  runSend("Starting text", () => sendText(text), document.getElementById("sendText"));
+};
+
+document.getElementById("sendDraw").onclick = () => {
+  runSend("Sending drawing", sendDrawing, document.getElementById("sendDraw"));
+};
+
+buildGrid();
+</script>
+</body>
+</html>
