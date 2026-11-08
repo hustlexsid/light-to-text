@@ -44,7 +44,7 @@
 <p id="status">Allow camera permission when asked.</p>
 
 <script>
-const BIT_MS = 120;     // MUST match BIT_MS on the ESP32
+const BIT_MS = 250;     // MUST match BIT_MS on the ESP32
 const DRAW_MARKER = 1;  // MUST match DRAW_MARKER on the ESP32
 let track = null;
 
@@ -92,12 +92,33 @@ async function sendByte(value) {
   await sendBits(frameFor(value & 0xFF));
 }
 
-// Long 1-second flash = "new message starts here"
+// Long start pulse = "new message starts here". Must be longer than 10 x BIT_MS.
 async function startPulse() {
   await setTorch(true);
-  await sleep(1200);
+  await sleep(3000);
   await setTorch(false);
   await sleep(800);
+}
+
+// Two check bytes: sum and XOR of the data.
+// The ESP32 rejects the message if these don't match.
+function checkBytes(values) {
+  let sum = 0, x = 0;
+  for (const v of values) {
+    sum = (sum + v) & 0xFF;
+    x ^= v;
+  }
+  return [sum, x];
+}
+
+async function sendValues(values) {
+  let sent = 0;
+  for (const v of values) {
+    await sendByte(v);
+    sent++;
+    statusEl.textContent = `Sending... ${sent}/${values.length}`;
+  }
+  await setTorch(false);
 }
 
 // ---------- Text ----------
@@ -107,14 +128,9 @@ async function sendText(text) {
   await sleep(500);
   await startPulse();
 
-  const payload = text + "\n";       // newline = end of message
-  let sent = 0;
-  for (const ch of payload) {
-    await sendByte(ch.charCodeAt(0));
-    sent++;
-    statusEl.textContent = `Sending text... ${sent}/${payload.length}`;
-  }
-  await setTorch(false);
+  const codes = [...text].map(ch => ch.charCodeAt(0) & 0xFF);
+  const [sum, x] = checkBytes(codes);
+  await sendValues([...codes, 10, sum, x]);   // 10 = newline, then check bytes
 }
 
 // ---------- Drawing ----------
@@ -148,11 +164,10 @@ async function sendDrawing() {
   await setTorch(false);
   await sleep(500);
   await startPulse();
-  await sendByte(DRAW_MARKER);       // tells the ESP32 "drawing next"
-  for (const row of rowBytes()) {
-    await sendByte(row);
-  }
-  await setTorch(false);
+
+  const rows = rowBytes();
+  const [sum, x] = checkBytes(rows);
+  await sendValues([DRAW_MARKER, ...rows, sum, x]);
 }
 
 document.getElementById("clearBtn").onclick = () => {
