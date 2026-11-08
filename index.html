@@ -92,11 +92,20 @@ async function sendByte(value) {
   await sendBits(frameFor(value & 0xFF));
 }
 
+// Long 1-second flash = "new message starts here"
+async function startPulse() {
+  await setTorch(true);
+  await sleep(1200);
+  await setTorch(false);
+  await sleep(800);
+}
+
 // ---------- Text ----------
 async function sendText(text) {
   await getTrack();
   await setTorch(false);
-  await sleep(1000);                 // lead-in so the receiver settles
+  await sleep(500);
+  await startPulse();
 
   const payload = text + "\n";       // newline = end of message
   let sent = 0;
@@ -137,7 +146,8 @@ function rowBytes() {
 async function sendDrawing() {
   await getTrack();
   await setTorch(false);
-  await sleep(1000);
+  await sleep(500);
+  await startPulse();
   await sendByte(DRAW_MARKER);       // tells the ESP32 "drawing next"
   for (const row of rowBytes()) {
     await sendByte(row);
